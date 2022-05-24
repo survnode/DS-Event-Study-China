@@ -1,0 +1,185 @@
+---
+title: Effects of COVID-19 Lockdown on the Financial Performance of the Banking Sector
+  in China
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+---
+```{r}
+# Read data from excel file
+library(readxl)
+banking <- read_excel("Stock_Data.xlsx", 
+    sheet = "Banking")
+# Import index data
+ssex <- read_excel("sse.xlsx")
+#We begin by analyzing banking sector data
+head(banking)
+```
+```{r}
+#split banking data by event day
+event_day = "2020-01-23"
+banking_lst <- split(banking,banking$date < event_day)
+
+# Insert after lockdown data into a new dataframe
+banking_after <- data.frame(banking_lst[1])
+
+#Remove Returns data from the event day
+banking_after <- banking_after[-1, ]
+
+#Remove rows 15 through last row
+banking_after <- banking_after[-c(15:nrow(banking_after)), ]
+nrow(banking_after)
+```
+
+```{r}
+# Insert before lockdown data into a new dataframe
+banking_before <- data.frame(banking_lst[2])
+nrow(banking_before)
+```
+
+```{r}
+# Calculate average daily returns before lockdown
+banking_before_nd <- banking_before[,-1] # Remove date column
+banking_before_nd$mean = rowMeans(banking_before_nd, na.rm=TRUE)
+
+# Calculate average period returns before lockdown
+mean(banking_before_nd$mean)*100
+```
+```{r}
+# Calculate average daily returns after lockdown
+banking_after_nd <- banking_after[,-1] # Remove date column
+banking_after_nd$mean = rowMeans(banking_after_nd, na.rm=TRUE)
+
+# Calculate average 14 day period returns after lockdown
+mean(banking_after_nd$mean)*100
+```
+```{r}
+# Implement PCA
+pc <- prcomp(banking[,-1],
+             center = TRUE,
+            scale. = TRUE)
+summary(pc)
+screeplot(pc, type = "l")
+s <- summary(prcomp(banking[,-1]))
+plot (s$importance[3, ])
+```
+```{r}
+# Examine the weights of PC1 by company
+
+pc1 <- prcomp(banking[,-1])$rotation[,"PC1"]
+
+library(knitr)
+library(ggplot2)
+library(data.table)
+
+df <- data.frame(pc1)
+
+#Plot PC1 weights by company
+ggplot(df, aes(x=pc1, y=row.names(df))) + geom_bar(stat="identity") + ylab("Company") + xlab("PC1")
+```
+```{r}
+#Sort and plot PC1 weights by company in descending order
+ggplot(df, mapping = aes(x = reorder(row.names(df), pc1), pc1)) + 
+  geom_bar(stat = "identity") + ylab("PC1") + xlab("Company") + coord_flip()
+```
+```{r}
+#Calculate and Normalize the PC1 weights
+df$weights = abs(pc1)/sum(abs(pc1))
+
+#transpose data frame
+df_t <- transpose(df)
+
+#redefine row and column names
+rownames(df_t) <- colnames(df)
+colnames(df_t) <- rownames(df)
+
+#display transposed data frame
+df <- data.frame(df_t)
+head(df)
+```
+
+```{r}
+#Calculate the weighted returns
+weights_df <- data.frame(df[- 1, ]) #remove pc row
+date <- data.frame(banking[, 1]) #create date data frame
+returns_df <- data.frame(banking[, -1]) #create returns data frame
+#Multiply the daily returns of each company by the respective weight
+weighted_returns <- data.frame(mapply(`*`,weights_df,returns_df))
+#Calculate the weighted average daily return
+weighted_returns$mean <- rowMeans(weighted_returns, na.rm=TRUE)*100
+```
+
+```{r}
+#Plot the wighted returns
+x  <- date$date
+y1 <- weighted_returns$mean
+df <- data.frame(x,y1)
+g <- ggplot(df, aes(x))
+g <- g + geom_line(aes(y=y1), colour="red", size = 1.2)
+g <- g + ylab("Returns (%)") + xlab("Date")
+g
+```
+```{r}
+#Conduct an event study on the weighted returns
+#Create a function to calculate the slope
+slope <- function(x, y){
+  m_x <- mean(x)
+  m_y <- mean(y)
+  noz <- sum((x - m_x)*(y-m_y))
+  dnz <- sum((x - m_x)^2)
+  s <- noz / dnz
+  return(s)
+}
+# Create a function to calculate the intercept
+intercept <- function(x, y, m){
+  b <- mean(y) - (m * mean(x))
+  return(b)
+}
+```
+
+```{r}
+#Aggregate sector and market returns into a data frame
+returns_data <- date
+returns_data$Market <- ssex$`Change %`
+returns_data$Sector <- weighted_returns$mean
+
+#Determine the event period (29 days)
+event <- returns_data[-c(30:nrow(returns_data)),]
+#Determine the estimation window (9 days)
+estimation_window <- returns_data[-c(9:nrow(returns_data)),]
+#Calculate the slope and intercept of the sector returns and market returns during the estimation window
+e_slope <- slope(estimation_window$Sector, estimation_window$Market)
+e_intercept <- intercept(estimation_window$Sector, estimation_window$Market, e_slope)
+#Calculate the abnormal returns (AR)
+event$AR <- event$Sector-(e_intercept+e_slope*event$Market)
+#Calculate the cummulative abnormal returns(CAR)
+event$CAR <- cumsum(event$AR)
+#Calculate the standard deviation of the AR and CAR
+ar_standev <- sd(event$AR)
+car_standev <- sd(event$CAR)
+#Calculate the daily t-Statistic of the AR and CAR 
+event$TStat_AR  <- event$AR/ar_standev
+event$TStat_CAR <- event$CAR/car_standev
+event$AR_Significant <- "NO"
+event$AR_Significant[event$TStat_AR > 1.699] <- "YES"
+event$CAR_Significant <- "NO"
+event$CAR_Significant[event$TStat_CAR > 1.699] <- "YES"
+
+#Plot the AR and CAR for the event period
+x  <- event$date
+y1 <- event$AR
+y2 <- event$CAR
+df <- data.frame(x,y1,y2)
+colors <- c("AR" = "blue", "CAR" = "red")
+
+ggplot(df, aes(x = x)) +
+    geom_line(aes(y = y1, color = "AR"), size = 1.2) +
+    geom_line(aes(y = y2, color = "CAR"), size = 1.2) +
+    labs(x = "Date",
+         y = "Return(%)",
+         color = "Legend") +
+    scale_color_manual(values = colors)
+```
+
